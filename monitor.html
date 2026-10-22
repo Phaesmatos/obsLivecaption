@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gladia → OBS · Caption monitor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 40px 24px; background: #10151d; color: #eaf0f8;
+      font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 960px; margin: auto; }
+    .eyebrow { color: #9bd8c2; font-size: 12px; letter-spacing: .15em; text-transform: uppercase; }
+    h1 { font-size: clamp(28px, 5vw, 42px); font-weight: 650; margin: 10px 0 8px; }
+    p { color: #aebccf; }
+    .row { display: flex; flex-wrap: wrap; gap: 16px; margin: 24px 0; }
+    .card { background: #1a2330; padding: 18px 22px; border: 1px solid #2c394c;
+      border-radius: 12px; flex: 1; min-width: 200px; }
+    .label { color: #9aacbf; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; }
+    .value { font-size: 20px; margin-top: 8px; }
+    meter { width: 100%; height: 12px; margin-top: 12px; }
+    .preview { position: relative; aspect-ratio: 16/9; overflow: hidden; border: 1px solid #34445b;
+      border-radius: 12px; background: linear-gradient(135deg, #1f3447, #244039 60%, #132127); }
+    .placeholder { position: absolute; inset: 25% 10%; text-align: center; color: #7d999e; }
+    .placeholder strong { display: block; font-size: 28px; color: #a2b8bb; }
+    iframe { width: 100%; height: 100%; position: absolute; border: 0; }
+    code { color: #d2e9ff; background: #202d3d; border-radius: 4px; padding: 3px 6px;
+      overflow-wrap: anywhere; }
+    .small { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">English + Italian → Italian</div>
+    <h1>Conference captions</h1>
+    <p>Keep this window for monitoring. Add the overlay URL below to OBS.</p>
+    <div class="row">
+      <div class="card"><div class="label">Connection</div><div class="value" id="status">Connecting…</div></div>
+      <div class="card"><div class="label">Microphone level</div><div class="value" id="level">—</div>
+        <meter id="meter" min="-70" max="0" value="-70"></meter></div>
+      <div class="card"><div class="label">Session time</div><div class="value" id="elapsed">00:00</div></div>
+    </div>
+    <div class="preview">
+      <div class="placeholder"><strong>Your conference video</strong>Only the captions are added by the overlay.</div>
+      <iframe src="/overlay" title="Italian caption preview"></iframe>
+    </div>
+    <p>OBS Browser Source: <code id="url"></code></p>
+    <p class="small" id="events">Waiting for captions…</p>
+    <p class="small"><span id="caption-mode">Italian speech appears as live text.</span> English speech appears after its Italian translation arrives.
+      Stop the app with <code>Ctrl+C</code> in its terminal.</p>
+  </main>
+  <script>
+    document.getElementById("url").textContent = location.origin + "/overlay";
+    async function refresh() {
+      try {
+        const response = await fetch("/state", {cache: "no-store", signal: AbortSignal.timeout(1500)});
+        if (!response.ok) throw new Error("Unavailable");
+        const s = await response.json();
+        document.getElementById("status").textContent = s.status;
+        document.getElementById("caption-mode").textContent = s.final_only
+          ? "Final-only mode: Italian speech appears after finalization."
+          : "Italian speech appears as live text.";
+        document.getElementById("level").textContent = s.audio_db + " dBFS";
+        document.getElementById("meter").value = s.audio_db;
+        const minutes = Math.floor(s.elapsed / 60);
+        const seconds = s.elapsed % 60;
+        document.getElementById("elapsed").textContent = minutes + ":" + String(seconds).padStart(2, "0");
+        document.getElementById("events").textContent =
+          (s.last_event || "Waiting for speech") + " · " + s.transcripts +
+          " transcript events · " + s.translations + " Italian translations";
+      } catch (_) {
+        document.getElementById("status").textContent = "App stopped or unavailable";
+        document.getElementById("level").textContent = "—";
+        document.getElementById("meter").value = -70;
+      }
+      setTimeout(refresh, 500);
+    }
+    refresh();
+  </script>
+</body>
+</html>

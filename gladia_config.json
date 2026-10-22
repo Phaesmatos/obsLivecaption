@@ -1,0 +1,41 @@
+{
+  "encoding": "wav/pcm",
+  "bit_depth": 16,
+  "sample_rate": 16000,
+  "channels": 1,
+  "model": "solaria-1",
+  "language_config": {
+    "languages": ["it", "en"],
+    "code_switching": true
+  },
+  "pre_processing": {
+    "speech_threshold": 0.5,
+    "audio_enhancer": false
+  },
+  "endpointing": 0.08,
+  "maximum_duration_without_endpointing": 10,
+  "realtime_processing": {
+    "custom_vocabulary": false,
+    "custom_spelling": false,
+    "translation": true,
+    "translation_config": {
+      "target_languages": ["it"],
+      "model": "base",
+      "match_original_utterances": true
+    },
+    "named_entity_recognition": true,
+    "sentiment_analysis": true
+  },
+  "callback": false,
+  "messages_config": {
+    "receive_partial_transcripts": true,
+    "receive_final_transcripts": true,
+    "receive_speech_events": true,
+    "receive_pre_processing_events": true,
+    "receive_realtime_processing_events": true,
+    "receive_post_processing_events": true,
+    "receive_acknowledgments": true,
+    "receive_errors": true,
+    "receive_lifecycle_events": true
+  }
+}
