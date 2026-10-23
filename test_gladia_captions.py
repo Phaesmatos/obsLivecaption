@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from types import SimpleNamespace
 
 import aiohttp
@@ -156,6 +156,100 @@ class CaptionTests(unittest.TestCase):
         self.assertNotIn("abc", result)
 
 
+class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
+    def test_environment_key_trims_whitespace_and_surrounding_quotes(self):
+        for value in ('  valid-test-key  ', '"valid-test-key"', "'valid-test-key'"):
+            with self.subTest(value=value), \
+                    patch.dict(app.os.environ, {"GLADIA_API_KEY": value}, clear=True), \
+                    patch.object(app.getpass, "getpass") as prompt:
+                self.assertEqual(app.read_api_key("GLADIA_API_KEY", "Gladia"), "valid-test-key")
+                prompt.assert_not_called()
+
+    def test_bad_paste_is_rejected_without_exposing_the_key(self):
+        for key in ("secret key", "secret\nkey", "secret\x00key", "secret\u200bkey", "<api-key>"):
+            with self.subTest(key=repr(key)), \
+                    patch.dict(app.os.environ, {}, clear=True), \
+                    patch.object(app.sys.stdin, "isatty", return_value=True), \
+                    patch.object(app.getpass, "getpass", return_value=key):
+                with self.assertRaises(app.CaptionError) as failure:
+                    app.read_api_key("GLADIA_API_KEY", "Gladia")
+                self.assertNotIn(key, str(failure.exception))
+
+    def test_replacement_uses_hidden_prompt_and_leaves_environment_unchanged(self):
+        with patch.dict(app.os.environ, {"GLADIA_API_KEY": "old-test-key"}, clear=True), \
+                patch.object(app.sys.stdin, "isatty", return_value=True), \
+                patch.object(app.getpass, "getpass", return_value=' "new-test-key" ') as prompt:
+            self.assertEqual(app.read_api_key("GLADIA_API_KEY", "Gladia", force_prompt=True),
+                             "new-test-key")
+            self.assertEqual(app.os.environ["GLADIA_API_KEY"], "old-test-key")
+            prompt.assert_called_once()
+
+    def test_missing_noninteractive_key_has_actionable_error(self):
+        with patch.dict(app.os.environ, {}, clear=True), \
+                patch.object(app.sys.stdin, "isatty", return_value=False):
+            with self.assertRaisesRegex(app.CaptionError, "Set GLADIA_API_KEY"):
+                app.read_api_key("GLADIA_API_KEY", "Gladia")
+
+    async def test_http_authentication_errors_are_actionable_and_do_not_echo_secrets(self):
+        for status, expected in ((401, app.GladiaAuthenticationError), (403, app.CaptionError)):
+            async def rejected(request):
+                self.assertEqual(request.headers["X-Gladia-Key"], "private-test-key")
+                return web.json_response({"message": "gladia user not found private-test-key"},
+                                         status=status)
+
+            service = web.Application()
+            service.router.add_post("/init", rejected)
+            async with TestServer(service) as server, aiohttp.ClientSession() as client:
+                with patch.object(app, "API_URL", str(server.make_url("/init"))):
+                    with self.assertRaises(expected) as failure:
+                        await app.initiate_session(client, {}, "private-test-key")
+            self.assertIn(str(status), str(failure.exception))
+            self.assertNotIn("private-test-key", str(failure.exception))
+
+    async def test_rejected_key_can_be_replaced_in_terminal(self):
+        with patch.object(app, "initiate_session", new_callable=AsyncMock) as init, \
+                patch.object(app.sys.stdin, "isatty", return_value=True), \
+                patch.object(app, "read_api_key", return_value="new-test-key"), \
+                patch("builtins.print") as output:
+            init.side_effect = [app.GladiaAuthenticationError("Gladia HTTP 401"), "wss://example"]
+            self.assertEqual(await app.session_with_auth(None, {}, "old-test-key"),
+                             ("wss://example", "new-test-key"))
+            self.assertEqual([call.args[2] for call in init.call_args_list],
+                             ["old-test-key", "new-test-key"])
+            self.assertNotIn("new-test-key", str(output.call_args_list))
+
+    async def test_same_rejected_key_is_not_retried(self):
+        with patch.object(app, "initiate_session", new_callable=AsyncMock) as init, \
+                patch.object(app.sys.stdin, "isatty", return_value=True), \
+                patch.object(app, "read_api_key", return_value="old-test-key"), \
+                patch("builtins.print"):
+            init.side_effect = app.GladiaAuthenticationError("Gladia HTTP 401")
+            with self.assertRaisesRegex(app.GladiaAuthenticationError, "same rejected"):
+                await app.session_with_auth(None, {}, "old-test-key")
+            self.assertEqual(init.await_count, 1)
+
+    async def test_noninteractive_authentication_does_not_prompt_or_retry(self):
+        with patch.object(app, "initiate_session", new_callable=AsyncMock) as init, \
+                patch.object(app.sys.stdin, "isatty", return_value=False), \
+                patch.object(app, "read_api_key") as prompt:
+            init.side_effect = app.GladiaAuthenticationError("Gladia HTTP 401")
+            with self.assertRaises(app.GladiaAuthenticationError):
+                await app.session_with_auth(None, {}, "old-test-key")
+            self.assertEqual(init.await_count, 1)
+            prompt.assert_not_called()
+
+    async def test_authentication_replacements_are_bounded(self):
+        with patch.object(app, "initiate_session", new_callable=AsyncMock) as init, \
+                patch.object(app.sys.stdin, "isatty", return_value=True), \
+                patch.object(app, "read_api_key", side_effect=["new-key-1", "new-key-2"]) as prompt, \
+                patch("builtins.print"):
+            init.side_effect = app.GladiaAuthenticationError("Gladia HTTP 401")
+            with self.assertRaises(app.GladiaAuthenticationError):
+                await app.session_with_auth(None, {}, "old-test-key")
+            self.assertEqual(init.await_count, 3)
+            self.assertEqual(prompt.call_count, 2)
+
+
 class DeepLTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -236,6 +330,95 @@ class DeepLTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(app.CaptionError):
                 await translator.translate("Good morning.")
         self.assertEqual(len(self.requests), 3)
+
+
+class WindowsAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.args = app.parser().parse_args(["--device", "3"])
+        self.state = app.CaptionState(Path(self.tmp.name) / "captions.txt")
+        self.sd = MagicMock()
+        self.sd.PortAudioError = RuntimeError
+
+    async def test_windows_validation_uses_input_id_and_pcm_format(self):
+        with patch.object(app.sys, "platform", "win32"), \
+                patch.object(app, "windows_audio", return_value=self.sd), \
+                patch.object(app, "sources", new_callable=AsyncMock) as linux_sources:
+            await app.validate_audio(self.args)
+        self.sd.check_input_settings.assert_called_once_with(
+            device=3, channels=1, dtype="int16", samplerate=16000)
+        linux_sources.assert_not_called()
+
+    async def test_linux_device_name_is_rejected_with_windows_instructions(self):
+        self.args.device = "alsa_input.usb-Yamaha.analog-stereo"
+        with patch.object(app.sys, "platform", "win32"), \
+                patch.object(app, "windows_audio", return_value=self.sd):
+            with self.assertRaisesRegex(app.CaptionError, "start.cmd --list-devices"):
+                await app.validate_audio(self.args)
+
+    async def test_default_and_named_devices(self):
+        self.assertIsNone(app.windows_device("@DEFAULT_SOURCE@"))
+        self.assertEqual(app.windows_device("Yamaha MME"), "Yamaha MME")
+
+    async def test_windows_list_excludes_output_devices(self):
+        self.sd.query_devices.return_value = [
+            {"name": "Yamaha", "hostapi": 0, "max_input_channels": 2},
+            {"name": "Speakers", "hostapi": 0, "max_input_channels": 0}]
+        self.sd.query_hostapis.return_value = [{"name": "MME"}]
+        with patch.object(app.sys, "platform", "win32"), \
+                patch.object(app, "windows_audio", return_value=self.sd), \
+                patch("builtins.print") as output:
+            await app.list_devices()
+        text = " ".join(str(call) for call in output.call_args_list)
+        self.assertIn("0: Yamaha [MME]", text)
+        self.assertNotIn("Speakers", text)
+
+    async def test_capture_yields_pcm_and_closes_when_consumer_stops(self):
+        pcm = b"\x01\x00" * app.FRAMES
+
+        def open_stream(**kwargs):
+            self.assertEqual(kwargs["samplerate"], 16000)
+            self.assertEqual(kwargs["channels"], 1)
+            self.assertEqual(kwargs["dtype"], "int16")
+            self.assertEqual(kwargs["device"], 3)
+            kwargs["callback"](pcm, app.FRAMES, None, "")
+            return self.sd.stream
+
+        self.sd.RawInputStream.side_effect = open_stream
+        with patch.object(app.sys, "platform", "win32"), \
+                patch.object(app, "windows_audio", return_value=self.sd):
+            frames = app.audio_frames(self.args, asyncio.Event(), self.state)
+            self.assertEqual(await anext(frames), pcm)
+            await frames.aclose()
+        self.sd.stream.__exit__.assert_called_once()
+
+    async def test_overflow_stops_capture_and_closes_stream(self):
+        def open_stream(**kwargs):
+            kwargs["callback"](b"\x00\x00" * app.FRAMES, app.FRAMES, None, "input overflow")
+            return self.sd.stream
+
+        self.sd.RawInputStream.side_effect = open_stream
+        with patch.object(app, "windows_audio", return_value=self.sd):
+            frames = app.windows_audio_frames(self.args, asyncio.Event(), self.state)
+            with self.assertRaisesRegex(app.CaptionError, "overflow"):
+                await anext(frames)
+        self.sd.stream.__exit__.assert_called_once()
+
+    async def test_windows_demo_starts_and_restores_signal_handlers(self):
+        args = app.parser().parse_args(["--demo", "--duration", "0.03"])
+        args.output = self.state.output
+        site = MagicMock()
+        site.start = AsyncMock()
+        with patch.object(app.sys, "platform", "win32"), \
+                patch.object(app.web, "TCPSite", return_value=site), \
+                patch.object(app.signal, "signal", return_value="previous") as install, \
+                patch.object(asyncio.get_running_loop(), "add_signal_handler") as unix_signal:
+            await app.run(args)
+        unix_signal.assert_not_called()
+        self.assertEqual(install.call_count, 4)
+        self.assertEqual(install.call_args_list[-1].args, (app.signal.SIGTERM, "previous"))
+        self.assertEqual(args.output.read_text(), "")
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):

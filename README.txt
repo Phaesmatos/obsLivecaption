@@ -1,4 +1,68 @@
-bash start.sh --deepl --final-only --captions-only
+WINDOWS QUICK START
+
+Open Command Prompt or PowerShell in this folder. Python 3.11+ is required.
+Run these commands (PowerShell also accepts the .\ prefix shown here):
+
+  .\install.cmd
+  .\start.cmd --demo
+
+Open http://127.0.0.1:8765/ to check the demo, then stop it with Ctrl+C.
+Add http://127.0.0.1:8765/overlay as an OBS Browser Source as described below.
+
+List Windows recording inputs and test the Yamaha mixer:
+
+  .\start.cmd --list-devices
+  .\start.cmd --device 1 --check-audio 5
+
+Replace 1 with the actual Yamaha input ID from the list, preferably its MME
+entry. Windows may list the same input under several audio APIs. Device IDs
+can change after reconnecting hardware. Linux alsa_input.* names do not work
+on Windows. Omit --device to use the Windows default recording input.
+
+Start your conference using that same ID:
+
+  .\start.cmd --deepl --final-only --captions-only --config gladia_config.conference.json --device 1
+
+Or select the Yamaha by name so reconnects/restarts do not change the choice:
+
+  .\start.cmd --deepl --final-only --captions-only --config gladia_config.conference.json --device "AG06/AG03 MME"
+
+The app prints the selected Windows input before connecting. To caption the
+OBS mix (Yamaha plus presentation audio), use --device "CABLE Output MME"
+instead, with OBS running and both sources monitored to CABLE Input.
+
+The launcher prompts privately for missing Gladia and DeepL keys; they stay
+in process memory. Existing GLADIA_API_KEY and DEEPL_API_KEY variables work.
+The installer creates a local .venv and installs Windows audio support.
+No Bash, WSL, PulseAudio or OBS Python plugin is needed on Windows.
+
+GLADIA HTTP 401 / "gladia user not found"
+
+This means Gladia rejected the credential, before any audio was uploaded.
+Copy or generate an active API key at https://app.gladia.io. Enter the Gladia
+key at the Gladia prompt and the separate DeepL API key at the DeepL prompt.
+Paste only the key; do not paste a header, shell command or account password.
+Accidental surrounding single/double quotes are removed automatically.
+In a terminal, a 401 prompts for a different Gladia key, with at most three
+authentication attempts. The same rejected key is never retried unchanged.
+Replacement keys stay in memory; saved environment variables are unchanged.
+For non-interactive runs, replace GLADIA_API_KEY in the launching environment.
+A valid key/account is required; changing audio settings cannot resolve 401.
+
+If capture fails, enable microphone access for desktop apps in Windows
+Settings > Privacy & security > Microphone (Privacy > Microphone on Windows 10).
+Use the local --check-audio meter before starting a paid live session.
+The app requests 16 kHz mono input; try an MME entry if another audio API
+rejects that format. Select the mixer separately as the Teams microphone.
+For an OBS text source on Windows, use Text (GDI+) with Read from file and
+select captions_it.txt in this folder. The Browser Source is recommended.
+
+Offline tests on Windows:
+
+  .\.venv\Scripts\python.exe -m unittest -v test_gladia_captions.py
+
+The remaining instructions describe the original Linux/Fedora setup.
+On Windows, replace bash start.sh with .\start.cmd and use Windows device IDs.
 
 
 GLADIA ITALIAN CAPTIONS FOR OBS
@@ -32,8 +96,8 @@ On Fedora, missing audio tools can be installed with:
 
   sudo dnf install pulseaudio-utils
 
-The capture backend is for Linux with PulseAudio or PipeWire's PulseAudio
-service. This package does not provide Windows/macOS microphone capture.
+Linux capture uses PulseAudio or PipeWire's PulseAudio service. Windows
+capture uses sounddevice/PortAudio. macOS microphone capture is not provided.
 
 
 2. TRY THE DEMO FIRST — NO KEY, MICROPHONE OR API USAGE

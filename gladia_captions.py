@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gladia live audio -> Italian captions -> OBS, for Linux/PipeWire.
+"""Gladia live audio -> Italian captions -> OBS, for Windows or Linux/PipeWire.
 
 No OBS Python plugin is needed. Run this process and add its local Browser
 Source, or point a Text (FreeType 2) source at captions_it.txt.
@@ -29,7 +29,7 @@ try:
     import aiohttp
     from aiohttp import web
 except ImportError:
-    raise SystemExit("Missing aiohttp. Run: bash install.sh")
+    raise SystemExit("Missing aiohttp. Run install.cmd on Windows, or bash install.sh on Linux.")
 
 ROOT = Path(__file__).resolve().parent
 API_URL = "https://api.gladia.io/v2/live?region=eu-west"
@@ -39,6 +39,10 @@ FRAMES = 1600  # 100 ms, mono signed 16-bit little-endian PCM.
 
 class CaptionError(Exception):
     """Actionable failure; safe to show in the operator console."""
+
+
+class GladiaAuthenticationError(CaptionError):
+    """The server rejected the credential; do not retry it unchanged."""
 
 
 class RetryableError(Exception):
@@ -51,6 +55,26 @@ def language(value):
 
 def clean_text(value):
     return " ".join(str(value or "").split())
+
+
+def read_api_key(variable, label, force_prompt=False):
+    key = "" if force_prompt else os.environ.get(variable, "").strip()
+    if not key:
+        if not sys.stdin.isatty():
+            raise CaptionError(f"Set {variable}, or run the launcher in a terminal "
+                               "for a hidden key prompt.")
+        key = getpass.getpass(f"{label} API key (hidden; paste only the key): ").strip()
+    # Quotes copied along with an example are not part of an API credential.
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        key = key[1:-1].strip()
+    if not key or key.startswith("<"):
+        raise CaptionError(f"No usable {label} API key entered. Copy the actual key "
+                           f"from your {label} API account.")
+    if not key.isascii() or any(char.isspace() or ord(char) < 32 or ord(char) == 127
+                                for char in key):
+        raise CaptionError(f"The {label} key contains spaces or invalid characters. "
+                           "Paste only the API key, without a header or command.")
+    return key
 
 
 def safe_error(value, key=""):
@@ -223,6 +247,64 @@ def audio_level(pcm):
     return max(-90.0, 20 * math.log10(max(rms, 1) / 32768))
 
 
+def windows_audio():
+    try:
+        import sounddevice
+    except (ImportError, OSError) as exc:
+        raise CaptionError(f"Windows audio unavailable: {exc}. Run install.cmd.") from None
+    return sounddevice
+
+
+def windows_device(value):
+    if value == "@DEFAULT_SOURCE@":
+        return None
+    if value.startswith("alsa_input.") or value.startswith("alsa_output."):
+        raise CaptionError("That is a Linux audio device name. Run start.cmd --list-devices "
+                           "and use the Windows input ID, for example --device 1.")
+    return int(value) if value.isdecimal() else value
+
+
+async def windows_audio_frames(args, stop, state):
+    sd = windows_audio()
+    loop = asyncio.get_running_loop()
+    queue = asyncio.Queue(maxsize=20)  # At most two seconds of audio; never replay a long backlog.
+    failure = None
+
+    def deliver(pcm, status):
+        nonlocal failure
+        if status:
+            failure = "Microphone capture overflow/error: " + str(status)
+        elif queue.full():
+            failure = "Microphone capture fell behind; audio queue is full."
+        elif failure is None:
+            queue.put_nowait(pcm)
+
+    def callback(indata, frames, timing, status):
+        loop.call_soon_threadsafe(deliver, bytes(indata), str(status) if status else "")
+
+    try:
+        with sd.RawInputStream(device=windows_device(args.device), samplerate=RATE,
+                               channels=1, dtype="int16", blocksize=FRAMES,
+                               callback=callback) as stream:
+            while not stop.is_set():
+                if failure:
+                    raise CaptionError(failure + " Check the input and restart.")
+                try:
+                    pcm = await asyncio.wait_for(queue.get(), 1)
+                except TimeoutError:
+                    if not stream.active:
+                        raise CaptionError("Microphone capture stopped. Check the input and restart.")
+                    continue
+                if failure:
+                    raise CaptionError(failure + " Check the input and restart.")
+                state.audio_db = audio_level(pcm)
+                yield pcm
+    except (sd.PortAudioError, ValueError) as exc:
+        raise CaptionError(f"Cannot capture Windows microphone: {exc}. "
+                           "Run start.cmd --list-devices; try the input's MME device ID. "
+                           "Allow microphone access for desktop apps in Windows Settings.") from None
+
+
 async def sources():
     if not shutil.which("pactl"):
         raise CaptionError("pactl is missing. On Fedora: sudo dnf install pulseaudio-utils")
@@ -242,6 +324,19 @@ async def sources():
 
 
 async def list_devices():
+    if sys.platform == "win32":
+        sd = windows_audio()
+        try:
+            devices = sd.query_devices()
+            hosts = sd.query_hostapis()
+            for index, device in enumerate(devices):
+                if device["max_input_channels"] > 0:
+                    print(f"{index}: {device['name']} [{hosts[device['hostapi']]['name']}]")
+        except sd.PortAudioError as exc:
+            raise CaptionError(f"Cannot list Windows inputs: {exc}") from None
+        print("\nDefault: Windows default recording input (omit --device).\n"
+              "Use --device ID from this list; try MME first. IDs can change after reconnecting.")
+        return
     for source in await sources():
         name = source.get("name", "")
         label = source.get("description", name)
@@ -261,6 +356,15 @@ async def validate_audio(args):
         except (OSError, wave.Error) as exc:
             raise CaptionError(f"Cannot read WAV: {exc}") from None
         return
+    if sys.platform == "win32":
+        sd = windows_audio()
+        try:
+            sd.check_input_settings(device=windows_device(args.device), channels=1,
+                                    dtype="int16", samplerate=RATE)
+        except (sd.PortAudioError, ValueError) as exc:
+            raise CaptionError(f"Windows input cannot capture 16 kHz mono audio: {exc}. "
+                               "Run start.cmd --list-devices and try the input's MME device ID.") from None
+        return
     if not shutil.which("parec"):
         raise CaptionError("parec is missing. On Fedora: sudo dnf install pulseaudio-utils")
     available = await sources()
@@ -272,7 +376,7 @@ async def validate_audio(args):
 
 
 async def audio_frames(args, stop, state):
-    """Capture via PipeWire's PulseAudio compatibility layer, or a real WAV parser."""
+    """Capture Windows/PulseAudio input, or stream a WAV at its real-time rate."""
     if args.wav:
         with wave.open(str(args.wav), "rb") as recording:
             deadline = time.monotonic()
@@ -284,6 +388,12 @@ async def audio_frames(args, stop, state):
                 state.audio_db = audio_level(pcm)
                 yield pcm
                 deadline += len(pcm) / (RATE * 2)
+        return
+
+    if sys.platform == "win32":
+        async with aclosing(windows_audio_frames(args, stop, state)) as frames:
+            async for pcm in frames:
+                yield pcm
         return
 
     proc = await asyncio.create_subprocess_exec(
@@ -433,7 +543,16 @@ class DeepLTranslator:
 
 async def initiate_session(client, config, key):
     async with client.post(API_URL, headers={"X-Gladia-Key": key}, json=config,
-                           timeout=aiohttp.ClientTimeout(total=20)) as response:
+                           timeout=aiohttp.ClientTimeout(total=20),
+                           allow_redirects=False) as response:
+        if response.status == 401:
+            raise GladiaAuthenticationError(
+                "Gladia rejected the API key (HTTP 401: account/key not recognized). "
+                "Copy an active Gladia API key from app.gladia.io. "
+                "Use the Gladia key here, not the DeepL key or your account password.")
+        if response.status == 403:
+            raise CaptionError("Gladia denied access (HTTP 403). Check the Gladia "
+                               "account's API permissions and live-transcription access.")
         if response.status != 201 and response.status != 200:
             detail = safe_error(await response.text(), key)
             message = f"Gladia HTTP {response.status}: {detail}"
@@ -447,6 +566,23 @@ async def initiate_session(client, config, key):
             parsed.hostname == "gladia.io" or (parsed.hostname or "").endswith(".gladia.io")):
         raise CaptionError("Gladia returned an unexpected WebSocket URL.")
     return url
+
+
+async def session_with_auth(client, config, key):
+    for attempt in range(3):
+        try:
+            return await initiate_session(client, config, key), key
+        except GladiaAuthenticationError as exc:
+            if attempt == 2 or not sys.stdin.isatty():
+                raise
+            print(f"{exc}\nEnter a replacement Gladia key "
+                  f"({attempt + 2}/3); it will not be saved.", flush=True)
+            replacement = read_api_key("GLADIA_API_KEY", "Gladia", force_prompt=True)
+            if replacement == key:
+                raise GladiaAuthenticationError(
+                    "The same rejected Gladia key was entered again. Copy or generate "
+                    "an active API key in app.gladia.io, then run the launcher again.")
+            key = replacement
 
 
 async def read_events(socket, state, translator=None):
@@ -530,23 +666,21 @@ async def stream_connection(socket, frames, state, stop, drain_seconds=15, trans
 
 
 async def run_live(args, state, stop, config):
-    key = os.environ.get("GLADIA_API_KEY", "").strip()
-    if not key or key.startswith("<"):
-        raise CaptionError("Set GLADIA_API_KEY, or use ./start.sh for a hidden key prompt.")
-    deepl_key = os.environ.get("DEEPL_API_KEY", "").strip()
-    if args.deepl and not deepl_key:
-        if sys.stdin.isatty():
-            deepl_key = getpass.getpass("DeepL API key (hidden): ").strip()
-        if not deepl_key:
-            raise CaptionError("Set DEEPL_API_KEY, or use ./start.sh --deepl for a hidden prompt.")
+    key = read_api_key("GLADIA_API_KEY", "Gladia")
+    deepl_key = read_api_key("DEEPL_API_KEY", "DeepL") if args.deepl else ""
     await validate_audio(args)
+    if sys.platform == "win32" and not args.wav:
+        sd = windows_audio()
+        device = sd.query_devices(windows_device(args.device), kind="input")
+        host = sd.query_hostapis(device["hostapi"])
+        print(f"Audio input: {device['name']} [{host['name']}]", flush=True)
     async with aiohttp.ClientSession() as client:
         for attempt in range(6):
             if stop.is_set():
                 return
             state.status = "Connecting to Gladia"
             try:
-                url = await initiate_session(client, config, key)
+                url, key = await session_with_auth(client, config, key)
                 if stop.is_set():
                     return
                 async with client.ws_connect(
@@ -671,14 +805,22 @@ async def run(args):
                          final_only=args.final_only)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
+    previous_signals = {}
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+        if sys.platform == "win32":
+            # ProactorEventLoop has no add_signal_handler on Windows.
+            previous_signals[sig] = signal.signal(
+                sig, lambda signum, frame: loop.call_soon_threadsafe(stop.set))
+        else:
+            loop.add_signal_handler(sig, stop.set)
     runner = web.AppRunner(make_app(state), access_log=None)
     await runner.setup()
     try:
         await web.TCPSite(runner, "127.0.0.1", args.port).start()
     except OSError as exc:
         await runner.cleanup()
+        for sig, handler in previous_signals.items():
+            signal.signal(sig, handler)
         raise CaptionError(f"Cannot open local port {args.port}: {exc}. "
                            "Stop the other caption process or use --port 8766.") from None
     state.clear()
@@ -723,6 +865,8 @@ async def run(args):
         state.status = "Stopped"
         state.clear()
         await runner.cleanup()
+        for sig, handler in previous_signals.items():
+            signal.signal(sig, handler)
         print("Stopped. Captions cleared.", flush=True)
 
 
@@ -730,7 +874,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path, default=ROOT / "gladia_config.json")
     p.add_argument("--output", type=Path, default=ROOT / "captions_it.txt")
-    p.add_argument("--device", default="@DEFAULT_SOURCE@", help="Exact pactl source name")
+    p.add_argument("--device", default="@DEFAULT_SOURCE@",
+                   help="Windows input ID/name, or Linux pactl source name; default: system input")
     modes = p.add_mutually_exclusive_group()
     modes.add_argument("--list-devices", action="store_true")
     modes.add_argument("--check-audio", type=float, metavar="SECONDS",
