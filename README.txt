@@ -63,8 +63,11 @@ Keep the terminal running while adding the OBS source.
   g. Move this source ABOVE your camera/video sources in the Sources list.
   h. Leave "Shutdown source when not visible" off.
 
-The background is transparent. Captions appear near the bottom, in two
-lines of white text with a dark background. The source contains no audio.
+The background is your conference image. Captions appear at the bottom,
+starting to the right of the logo and extending towards the right edge.
+The source contains no audio. This source is now opaque: if you also want
+a camera/video visible, place that source above this background and keep
+its frame clear of the bottom caption strip.
 Do not use the operator-monitor URL "/" as the OBS source.
 
 Your existing LocalVocal setup can stay installed. To avoid two caption
@@ -307,9 +310,47 @@ sessions. Gladia's live session limit is three hours; this app is intended
 for your one-to-two-hour conference and does not implement automatic rollover.
 
 Appearance:
-  - Edit overlay.html to change font, background or bottom margin.
+  - The original image is copied unchanged to assets/background.png.
+    Replace that file with another PNG to change the background.
+    Alternatively put another image in assets/ and edit --background-image
+    near the top of overlay.html (for example url("/assets/new-image.jpg")).
+  - --caption-left, --caption-right and --caption-bottom in overlay.html
+    control placement. The default left edge is 10%, clear of this image's logo.
+  - The entire image is shown in a 1672:941 frame, with letterboxing for other
+    viewport shapes. For a differently shaped replacement, also adjust the
+    #scene aspect-ratio and width's vh value (100 * width / height).
+  - Edit overlay.html to change font, caption background or bottom margin.
   - --width 60 controls character wrapping; --clear-after 7 controls timeout.
   - Refresh the OBS Browser Source after editing its HTML/CSS.
+
+OPTIONAL CONFERENCE PRESET FOR ITALIAN/ENGLISH TURN-TAKING
+
+  bash start.sh --deepl --final-only --captions-only --config gladia_config.conference.json
+
+Keep your explicit Yamaha --device argument if needed.
+This separate preset uses endpointing=0.3, speech_threshold=0.6 and a maximum
+segment length of 8 seconds. It retains languages=["it","en"], code_switching=true
+and audio_enhancer=false. The original gladia_config.json remains available.
+The 8-second cap is a compromise to try for translation context vs. delay;
+Gladia's own live-caption example recommends 5 seconds. Compare --max-segment 5
+if long uninterrupted speech is too delayed, or 10 if fragments lose context.
+
+The speech threshold detects speech vs. noise, not people or languages.
+Start with 0.6; try 0.7 only when noise is triggering false words. If quiet
+speakers or word beginnings disappear, try 0.5 and fix microphone levels first.
+Do not raise it to compensate for a nearly silent or inaccessible input.
+Endpointing=0.3 waits for 300 ms of silence before closing a segment; your
+old 0.08 setting could split speech at short hesitations. Very long pauses
+are unnecessary, but speakers should avoid overlapping during handovers.
+Language is detected per utterance, so a language change within one segment
+can remain difficult. These values are starting points, not an accuracy guarantee.
+With DeepL, English also incurs a translation request; Italian passes through,
+so the two languages will not have identical display latency.
+
+Official guidance:
+https://docs.gladia.io/chapters/language/code-switching
+https://docs.gladia.io/chapters/live-stt/recommended-parameters
+https://support.gladia.io/article/how-to-deal-with-noisy-or-bad-quality-audio
 
 An existing WAV can be streamed for rehearsal:
 

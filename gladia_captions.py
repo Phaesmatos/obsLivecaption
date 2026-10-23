@@ -294,12 +294,10 @@ async def audio_frames(args, stop, state):
     try:
         while not stop.is_set():
             try:
-                pcm = await asyncio.wait_for(proc.stdout.readexactly(FRAMES * 2), 10)
+                pcm = await proc.stdout.readexactly(FRAMES * 2)
             except asyncio.IncompleteReadError:
                 raise CaptionError("Microphone capture stopped. Check the selected input "
                                    "and PipeWire, then restart.") from None
-            except TimeoutError:
-                raise CaptionError("No audio frames arrived for 10 seconds. Check the input.") from None
             state.audio_db = audio_level(pcm)
             yield pcm
     finally:
@@ -630,6 +628,7 @@ def make_app(state):
     app.router.add_get("/", panel)
     app.router.add_get("/overlay", overlay)
     app.router.add_get("/state", snapshot)
+    app.router.add_static("/assets/", ROOT / "assets", show_index=False)
     return app
 
 
